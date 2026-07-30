@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ramprate"
+version = "0.1.0"
+description = "Characterization of power plant ramp rates using hourly EPA CEMS data"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Catalyst Cooperative", email = "pudl@catalyst.coop" }]
+requires-python = ">=3.9"
+dependencies = [
+    "duckdb>=1.4.5",
+    "matplotlib>=3.4.2",
+    "networkx>=2.5",
+    "numpy>=1.20.3",
+    "pandas>=1.2.4",
+    "pyarrow>=3.0.0",
+    "python-dotenv>=0.19.0",
+    "tqdm>=4.61.0",
+]
+
+[project.optional-dependencies]
+dev = ["notebook>=6.4.0", "pytest>=8.0"]
+
+[project.scripts]
+calc_ramps = "ramprate.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

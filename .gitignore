@@ -69,6 +69,11 @@ target/
 # VS Code
 .vscode/
 
+# uv
+.venv/
+venv/
+# uv.lock
+
 # Spyder
 .spyproject/
 

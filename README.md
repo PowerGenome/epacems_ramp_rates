@@ -4,12 +4,32 @@ Characterization of power plant maximum ramp rates (in MW/hr) using hourly EPA C
 
 ## Installation
 
-1. Create a new virtual environment with python>=3.8
-2. clone this repo
-3. `cd` to the repo root
-4. run `bash install.sh`
+1. Install [uv](https://docs.astral.sh/uv/) if it is not already available:
 
-The data source is the EPA CEMS dataset as defined by the [catalyst-cooperative/pudl](https://github.com/catalyst-cooperative/pudl) repo. The `install.sh` script downloads several GB of the latest data for you. 
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+2. Clone this repository and change into the repo root:
+
+   ```bash
+   git clone <repo-url>
+   cd epacems_ramp_rates
+   ```
+
+3. Create the environment and install the package:
+
+   ```bash
+   uv sync --extra dev
+   ```
+
+4. Run the data download/install helper:
+
+   ```bash
+   bash install.sh
+   ```
+
+The data source is the EPA CEMS dataset as defined by the [catalyst-cooperative/pudl](https://github.com/catalyst-cooperative/pudl) repo. The `install.sh` script downloads several GB of the latest data for you.
 
 ## Usage
 
