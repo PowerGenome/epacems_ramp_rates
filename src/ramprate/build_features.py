@@ -314,7 +314,7 @@ def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
             joined_timestamps = events.join(
                 boundary_timestamps, on="unit_id_epa", how="left"
             )["operating_datetime_utc"]
-            events[col].fillna(joined_timestamps, inplace=True)
+            events[col] = events[col].fillna(joined_timestamps)
 
     events["duration_hours"] = (
         events["shutdown"].sub(events["startup"]).dt.total_seconds().div(3600)
