@@ -29,17 +29,20 @@ Characterization of power plant maximum ramp rates (in MW/hr) using hourly EPA C
    bash install.sh
    ```
 
-The data source is the EPA CEMS dataset as defined by the [catalyst-cooperative/pudl](https://github.com/catalyst-cooperative/pudl) repo. The `install.sh` script downloads several GB of the latest data for you.
+The data source is the PUDL nightly EPA CEMS parquet file:
+https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/core_epacems__hourly_emissions.parquet
+
+`install.sh` downloads that file and writes a filtered local parquet containing records with `operating_datetime_utc >= 2015-01-01`.
 
 ## Usage
 
-To create .csv files with the results of this analysis, use the CLI:`$ calc_ramps MY_OUTPUT.CSV`. See `--help` for details about optional arguments like analyzing a subset of states or years. The script takes about 1.5 minutes per year of data to run.
+To create .csv files with the results of this analysis, use the CLI: `$ calc_ramps MY_OUTPUT.CSV`. See `--help` for details about optional arguments like analyzing a subset of states or years. The script takes about 1.5 minutes per year of data to run.
 
 For interactive use in a jupyter notebook, see the example in notebooks/8.0-tb-example_of_interactive_use.ipynb. Notebooks 0.0 to 7.0 were used for development and are not well documented.
 
 ### Output Data Dictionary
 
-See [/results/REAMDE.md](https://github.com/catalyst-cooperative/epacems_ramp_rates/tree/main/results)
+See [results/README.md](results/README.md)
 
 ## Methodology
 

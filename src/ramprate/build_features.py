@@ -413,7 +413,7 @@ def aggregate_subcomponents(
 
     aggs = (
         xwalk.groupby("component_id")["EIA_UNIT_TYPE"]
-        .agg(lambda x: frozenset(x.values.reshape(-1)))
+        .agg(lambda x: frozenset(np.asarray(x).ravel()))
         .to_frame()
         .astype("category")
     )
@@ -500,15 +500,48 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         cems = cems.set_index(
             ["unit_id_epa", "operating_datetime_utc"],
             drop=False,
-        ).sort_index(inplace=True)
+        )
+        cems.sort_index(inplace=True)
 
     calc_distance_from_downtime(cems)  # in place
-    key_map = cems.groupby(level="unit_id_epa")[
-        ["plant_id_eia", "unitid", "unit_id_epa"]
-    ].first()
+    if "plant_id_epa" in cems.columns:
+        plant_join_col = "plant_id_epa"
+    elif "plant_id_eia" in cems.columns:
+        plant_join_col = "plant_id_eia"
+    else:
+        raise KeyError("CEMS data must include plant_id_epa or plant_id_eia.")
+
+    if "emissions_unit_id_epa" in cems.columns:
+        unit_join_col = "emissions_unit_id_epa"
+    elif "unitid" in cems.columns:
+        unit_join_col = "unitid"
+    else:
+        raise KeyError("CEMS data must include emissions_unit_id_epa or unitid.")
+
+    key_cols = [
+        col
+        for col in [
+            "plant_id_eia",
+            "plant_id_epa",
+            "unitid",
+            "emissions_unit_id_epa",
+            "unit_id_epa",
+        ]
+        if col in cems.columns
+    ]
+    key_map = cems.groupby(level="unit_id_epa")[key_cols].first()
+    key_map[unit_join_col] = key_map[unit_join_col].astype("string")
+    key_map[plant_join_col] = pd.to_numeric(key_map[plant_join_col], errors="coerce")
+
+    crosswalk = crosswalk.copy()
+    crosswalk["CAMD_UNIT_ID"] = crosswalk["CAMD_UNIT_ID"].astype("string")
+    crosswalk["CAMD_PLANT_ID"] = pd.to_numeric(
+        crosswalk["CAMD_PLANT_ID"], errors="coerce"
+    )
+
     key_map = key_map.merge(
         crosswalk,
-        left_on=["plant_id_eia", "unitid"],
+        left_on=[plant_join_col, unit_join_col],
         right_on=["CAMD_PLANT_ID", "CAMD_UNIT_ID"],
         how="inner",
     )
@@ -580,8 +613,8 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         # associate correct timestamp - note that ties go to idxmax, nans go to idxmin
         condition = ramps.loc[:, (header, "max")] >= ramps.loc[:, (header, "min")].abs()
         ramps.loc[:, (header, "idxmax_abs")] = ramps.loc[:, idx[header, "idxmax"]]
-        ramps.loc[:, (header, "idxmax_abs")].where(
-            condition, ramps.loc[:, (header, "idxmin")], inplace=True
+        ramps.loc[:, (header, "idxmax_abs")] = ramps.loc[:, (header, "idxmax_abs")].where(
+            condition, ramps.loc[:, (header, "idxmin")]
         )
     # remove multiindex
     ramps.columns = ["_".join(reversed(col)) for col in ramps.columns]

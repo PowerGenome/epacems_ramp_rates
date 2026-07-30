@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 # from pathlib import Path
 import itertools
+from datetime import datetime, timezone
 from os import getenv
 from typing import Optional, Sequence
 
 import pandas as pd
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -76,7 +78,42 @@ ALL_STATES = (  # includes territories and DC
     "WY",
 )
 
-ALL_CEMS_YEARS = range(1995, 2020)
+ALL_CEMS_YEARS = range(1995, datetime.now(timezone.utc).year + 1)
+
+
+def _available_epacems_columns() -> set[str]:
+    """Return available columns in the configured EPA CEMS parquet dataset."""
+    if not EPA_CEMS_DATA_PATH:
+        return set()
+    try:
+        return set(pq.read_schema(EPA_CEMS_DATA_PATH).names)
+    except Exception:
+        return set()
+
+
+def _build_unit_id_epa(cems: pd.DataFrame) -> pd.Series:
+    """Create a stable surrogate unit ID if unit_id_epa is not provided."""
+    if "unitid" in cems.columns:
+        unit_col = "unitid"
+    elif "emissions_unit_id_epa" in cems.columns:
+        unit_col = "emissions_unit_id_epa"
+    else:
+        raise KeyError("Cannot derive unit_id_epa: no unit identifier column found.")
+
+    if "plant_id_eia" in cems.columns:
+        plant_col = "plant_id_eia"
+    elif "plant_id_epa" in cems.columns:
+        plant_col = "plant_id_epa"
+    else:
+        raise KeyError("Cannot derive unit_id_epa: no plant identifier column found.")
+
+    key = (
+        cems[[plant_col, unit_col]]
+        .astype("string")
+        .fillna("<NA>")
+        .agg("||".join, axis=1)
+    )
+    return pd.factorize(key, sort=False)[0].astype("int64")
 
 
 def year_state_filter(years=(), states=()):
@@ -186,17 +223,54 @@ def load_epacems(
 
     # pudl_settings = pudl.workspace.setup.get_defaults()
     # cems_path = Path(pudl_settings["parquet_dir"]) / "epacems"
+    available = _available_epacems_columns()
+    read_columns = columns
+    if columns is not None and available:
+        aliases = {
+            "unitid": "emissions_unit_id_epa",
+            "steam_load_1000_lbs": "steam_load_lbs",
+        }
+        read_columns = []
+        for col in columns:
+            if col in available:
+                read_columns.append(col)
+            elif col in aliases and aliases[col] in available:
+                read_columns.append(aliases[col])
+            elif col == "unit_id_epa":
+                # May be synthesized after read if absent in source schema.
+                continue
+            else:
+                read_columns.append(col)
+        read_columns = list(dict.fromkeys(read_columns))
+
     cems = pd.read_parquet(
         # cems_path,
         EPA_CEMS_DATA_PATH,
-        use_nullable_dtypes=True,
-        columns=columns,
+        # use_nullable_dtypes=True,
+        columns=read_columns,
         # filters=pudl.output.epacems.year_state_filter(
         filters=year_state_filter(
             states=states,
             years=years,
         ),
     )
+
+    # Backward compatibility: mirror legacy CEMS column names when only new names exist.
+    if "unitid" not in cems.columns and "emissions_unit_id_epa" in cems.columns:
+        cems["unitid"] = cems["emissions_unit_id_epa"]
+    if "steam_load_1000_lbs" not in cems.columns and "steam_load_lbs" in cems.columns:
+        cems["steam_load_1000_lbs"] = cems["steam_load_lbs"] / 1000
+
+    if "unit_id_epa" not in cems.columns:
+        cems["unit_id_epa"] = _build_unit_id_epa(cems)
+
+    if columns is not None:
+        # Preserve requested legacy column set/order after compatibility transformations.
+        missing = [col for col in columns if col not in cems.columns]
+        if missing:
+            raise KeyError(f"Requested columns are missing after load: {missing}")
+        cems = cems.loc[:, columns]
+
     return cems
 
 
