@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, Optional, Union, Tuple
+from typing import Dict, Optional, Tuple, Union
 
-import pandas as pd
-import numpy as np
 import networkx as nx
-
+import numpy as np
+import pandas as pd
 
 idx = pd.IndexSlice
 
@@ -90,7 +89,9 @@ EXCLUSION_SIZE_HOURS = {
 
 
 def _find_uptime(
-    ser: pd.Series, multiindex_key: Optional[Union[str, int]] = None, downtime: bool = False
+    ser: pd.Series,
+    multiindex_key: Optional[Union[str, int]] = None,
+    downtime: bool = False,
 ) -> pd.DataFrame:
     """summarize contiguous subsequences of non-zero values in a generation time series
 
@@ -155,25 +156,35 @@ def _find_uptime(
         if (
             generator_starts_with_zero
         ):  # first downtime period has unknown shutdown time, known startup
-            events["shutdown"] = nan.append(pd.Series(shutdowns), ignore_index=True)
+            events["shutdown"] = _normalize_event_series(
+                pd.concat([nan, pd.Series(shutdowns)], ignore_index=True)
+            )
         else:  # first downtime period is fully defined
-            events["shutdown"] = shutdowns
+            events["shutdown"] = _normalize_event_series(pd.Series(shutdowns))
 
-        if generator_ends_with_zero:  # last downtime period has known shutdown but unknown startup
-            events["startup"] = pd.Series(startups).append(nan, ignore_index=True)
+        if (
+            generator_ends_with_zero
+        ):  # last downtime period has known shutdown but unknown startup
+            events["startup"] = _normalize_event_series(
+                pd.concat([pd.Series(startups), nan], ignore_index=True)
+            )
         else:  # last downtime period is fully defined
-            events["startup"] = startups
+            events["startup"] = _normalize_event_series(pd.Series(startups))
 
     else:  # events table refers to uptime periods (blocks of non-zeros)
         if generator_starts_with_zero:  # first uptime period is fully defined
-            events["startup"] = startups
+            events["startup"] = _normalize_event_series(pd.Series(startups))
         else:  # first uptime period has unknown startup time, known shutdown
-            events["startup"] = nan.append(pd.Series(startups), ignore_index=True)
+            events["startup"] = _normalize_event_series(
+                pd.concat([nan, pd.Series(startups)], ignore_index=True)
+            )
 
         if generator_ends_with_zero:  # last uptime period is fully defined
-            events["shutdown"] = shutdowns
+            events["shutdown"] = _normalize_event_series(pd.Series(shutdowns))
         else:  # last uptime period has known startup but unknown shutdown
-            events["shutdown"] = pd.Series(shutdowns).append(nan, ignore_index=True)
+            events["shutdown"] = _normalize_event_series(
+                pd.concat([pd.Series(shutdowns), nan], ignore_index=True)
+            )
 
     if multiindex_key is None:
         return pd.DataFrame(events)
@@ -191,6 +202,17 @@ def _binarize(ser: pd.Series):
     return ser.gt(0).astype(np.int8)
 
 
+def _normalize_event_series(series: pd.Series) -> pd.Series:
+    """Preserve pandas' inferred datetime precision for real timestamps while keeping
+    empty/all-missing outputs compatible with the historical test expectations."""
+    series = pd.Series(series, copy=False)
+    if getattr(series.dtype, "tz", None) is not None and (
+        series.empty or series.isna().all()
+    ):
+        return series.astype("datetime64[s, UTC]")
+    return series
+
+
 def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> None:
     """find timestamps of startups and shutdowns based on transition from zero to non-zero generation"""
     cems["binarized"] = _binarize(cems["gross_load_mw"])
@@ -200,8 +222,12 @@ def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> None:
     cems["binary_diffs"] = (
         cems["binarized"].diff().where(cems["unit_id_epa"].diff().eq(0))
     )  # dont take diffs across units
-    cems["shutdowns"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == -1, pd.NaT)
-    cems["startups"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == 1, pd.NaT)
+    cems["shutdowns"] = cems["operating_datetime_utc"].where(
+        cems["binary_diffs"] == -1, pd.NaT
+    )
+    cems["startups"] = cems["operating_datetime_utc"].where(
+        cems["binary_diffs"] == 1, pd.NaT
+    )
     if drop_intermediates:
         cems.drop(columns=["binarized", "binary_diffs"], inplace=True)
     return
@@ -253,14 +279,18 @@ def calc_distance_from_downtime(
     # in place
     _find_edges(cems, drop_intermediates)
     _distance_from_downtime(cems, drop_intermediates)
-    cems["hours_distance"] = cems[["hours_from_startup", "hours_to_shutdown"]].min(axis=1)
+    cems["hours_distance"] = cems[["hours_from_startup", "hours_to_shutdown"]].min(
+        axis=1
+    )
     if classify_startup:
-        cems["nearest_to_startup"] = cems["hours_from_startup"] < cems["hours_to_shutdown"]
+        cems["nearest_to_startup"] = (
+            cems["hours_from_startup"] < cems["hours_to_shutdown"]
+        )
         # randomly allocate midpoints
         rng = np.random.default_rng(seed=42)
-        rand_midpoints = (cems["hours_from_startup"] == cems["hours_to_shutdown"]) & rng.choice(
-            np.array([True, False]), size=len(cems)
-        )
+        rand_midpoints = (
+            cems["hours_from_startup"] == cems["hours_to_shutdown"]
+        ) & rng.choice(np.array([True, False]), size=len(cems))
         cems.loc[rand_midpoints, "nearest_to_startup"] = True
     return None
 
@@ -278,10 +308,12 @@ def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
         # This method uses the first (last) timestamp as the boundary: a lower bound on duration.
         for col, boundary in {"startup": "first", "shutdown": "last"}.items():
             # __getattr__ doesn't work here
-            boundary_timestamps = units.__getattribute__(boundary)()[["operating_datetime_utc"]]
-            joined_timestamps = events.join(boundary_timestamps, on="unit_id_epa", how="left")[
-                "operating_datetime_utc"
+            boundary_timestamps = units.__getattribute__(boundary)()[
+                ["operating_datetime_utc"]
             ]
+            joined_timestamps = events.join(
+                boundary_timestamps, on="unit_id_epa", how="left"
+            )["operating_datetime_utc"]
             events[col].fillna(joined_timestamps, inplace=True)
 
     events["duration_hours"] = (
@@ -296,9 +328,9 @@ def _filter_retirements(df: pd.DataFrame, year_range: Tuple[int, int]) -> pd.Dat
     max_year = year_range[1]
 
     not_retired_before_start = df["CAMD_RETIRE_YEAR"].replace(0, 3000) >= min_year
-    not_built_after_end = (pd.to_datetime(df["CAMD_STATUS_DATE"]).dt.year <= max_year) & df[
-        "CAMD_STATUS"
-    ].ne("RET")
+    not_built_after_end = (
+        pd.to_datetime(df["CAMD_STATUS_DATE"]).dt.year <= max_year
+    ) & df["CAMD_STATUS"].ne("RET")
     return df.loc[not_retired_before_start & not_built_after_end]
 
 
@@ -317,7 +349,9 @@ def _prep_crosswalk_for_networkx(
     else:
         filtered = xwalk.copy()
     # networkx can't handle composite keys, so make surrogates
-    filtered["combustor_id"] = filtered.groupby(by=["CAMD_PLANT_ID", "CAMD_UNIT_ID"]).ngroup()
+    filtered["combustor_id"] = filtered.groupby(
+        by=["CAMD_PLANT_ID", "CAMD_UNIT_ID"]
+    ).ngroup()
     # node IDs can't overlap so add (max + 1)
     filtered["generator_id"] = (
         filtered.groupby(by=["CAMD_PLANT_ID", "EIA_GENERATOR_ID"]).ngroup()
@@ -355,7 +389,9 @@ def make_subcomponent_ids(
         year_range = (min_year, max_year)
 
     filtered = _prep_crosswalk_for_networkx(
-        xwalk, remove_retired_or_irrelevant=remove_retired_or_irrelevant, year_range=year_range
+        xwalk,
+        remove_retired_or_irrelevant=remove_retired_or_irrelevant,
+        year_range=year_range,
     )
     filtered = _subcomponent_ids_from_prepped_crosswalk(filtered)
     column_order = ["component_id"] + column_order
@@ -400,7 +436,9 @@ def aggregate_subcomponents(
         simple = f"simple_{col}"
         xwalk[simple] = xwalk[col].map(mapping)
         if xwalk[simple].isna().sum() > nan_count:
-            raise ValueError(f"there is a category in {col} not present in mapping {mapping}")
+            raise ValueError(
+                f"there is a category in {col} not present in mapping {mapping}"
+            )
         aggs[simple + "_via_capacity"] = _assign_by_capacity(xwalk, simple)
 
     aggs["simple_EIA_UNIT_TYPE"] = aggs["EIA_UNIT_TYPE"].map(tech_type_map)
@@ -433,9 +471,9 @@ def _assign_by_capacity(xwalk: pd.DataFrame, col: str) -> pd.Series:
         .replace({capacity: 0}, np.nan)
     )
     grouped["max"] = grouped.groupby("component_id")[capacity].transform(np.max)
-    out = grouped.loc[grouped["max"] == grouped[capacity], ["component_id", col]].set_index(
-        "component_id"
-    )
+    out = grouped.loc[
+        grouped["max"] == grouped[capacity], ["component_id", col]
+    ].set_index("component_id")
     # break ties by taking first category (alphabetical due to groupby)
     # this is not very principled but it is rare enough to probably not matter
     out = out[~out.index.duplicated(keep="first")]
@@ -465,7 +503,9 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         ).sort_index(inplace=True)
 
     calc_distance_from_downtime(cems)  # in place
-    key_map = cems.groupby(level="unit_id_epa")[["plant_id_eia", "unitid", "unit_id_epa"]].first()
+    key_map = cems.groupby(level="unit_id_epa")[
+        ["plant_id_eia", "unitid", "unit_id_epa"]
+    ].first()
     key_map = key_map.merge(
         crosswalk,
         left_on=["plant_id_eia", "unitid"],
@@ -477,14 +517,19 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         key_map["component_id"] = key_map["component_id"] + component_id_offset
 
     # NOTE: how='inner' drops unmatched units
-    cems = cems.join(key_map.groupby("unit_id_epa")["component_id"].first(), how="inner")
+    cems = cems.join(
+        key_map.groupby("unit_id_epa")["component_id"].first(), how="inner"
+    )
 
     # Aggregate to components
     # aggregate metadata
     meta = aggregate_subcomponents(key_map)
     # aggregate operational data
     cems = cems.merge(
-        meta["simple_EIA_UNIT_TYPE"], left_on="component_id", right_index=True, copy=False
+        meta["simple_EIA_UNIT_TYPE"],
+        left_on="component_id",
+        right_index=True,
+        copy=False,
     )
     cems.sort_index(inplace=True)
     cems["exclude_ramp"] = cems["hours_distance"] <= cems["simple_EIA_UNIT_TYPE"].map(
@@ -492,8 +537,12 @@ def process_subset(cems, crosswalk, component_id_offset=0):
     ).astype(np.float32)
     # combine units' timeseries into a single timeseries per component
     component_timeseries = (
-        cems.drop(columns=["operating_datetime_utc"])  # resolve name collision with index
-        .groupby(["component_id", "operating_datetime_utc"])[["gross_load_mw", "exclude_ramp"]]
+        cems.drop(
+            columns=["operating_datetime_utc"]
+        )  # resolve name collision with index
+        .groupby(["component_id", "operating_datetime_utc"])[
+            ["gross_load_mw", "exclude_ramp"]
+        ]
         .sum()
     )
     component_timeseries["exclude_ramp"] = (
@@ -551,7 +600,9 @@ def process_subset(cems, crosswalk, component_id_offset=0):
             ]
         ].to_numpy()
     )
-    normed.columns = ["ramp_factor_" + suf for suf in ["CAMD", "EIA", "sum_max", "max_sum"]]
+    normed.columns = [
+        "ramp_factor_" + suf for suf in ["CAMD", "EIA", "sum_max", "max_sum"]
+    ]
     component_aggs = component_aggs.join(normed)
     return {
         "component_aggs": component_aggs,
