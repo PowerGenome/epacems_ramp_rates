@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # from pathlib import Path
-from typing import Sequence, Optional
 import itertools
 from os import getenv
+from typing import Optional, Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -12,7 +12,9 @@ load_dotenv()
 # from makefile:install
 EPA_CEMS_DATA_PATH = getenv("EPA_CEMS_DATA_PATH")
 
-EPA_CROSSWALK_RELEASE = "https://github.com/USEPA/camd-eia-crosswalk/releases/download/v0.2.1/"
+EPA_CROSSWALK_RELEASE = (
+    "https://github.com/USEPA/camd-eia-crosswalk/releases/download/v0.3/"
+)
 
 ALL_STATES = (  # includes territories and DC
     "AK",
