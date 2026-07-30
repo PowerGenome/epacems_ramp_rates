@@ -29,10 +29,18 @@ Characterization of power plant maximum ramp rates (in MW/hr) using hourly EPA C
    bash install.sh
    ```
 
+   Optional date range controls:
+
+   ```bash
+   START_DATE=2015-01-01 END_DATE=2025-01-01 bash install.sh
+   ```
+
+   `START_DATE` is inclusive. `END_DATE` is exclusive. If `END_DATE` is omitted, data is pulled through the newest available records.
+
 The data source is the PUDL nightly EPA CEMS parquet file:
 https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/core_epacems__hourly_emissions.parquet
 
-`install.sh` downloads that file and writes a filtered local parquet containing records with `operating_datetime_utc >= 2015-01-01`.
+`install.sh` materializes a local parquet directly from that remote file for only the requested date range using `operating_datetime_utc` filters, rather than downloading the entire source parquet first.
 
 ## Usage
 
@@ -97,7 +105,7 @@ Categorical metadata like turbine type and fuel type are also aggregated to the 
     │
     ├── setup.py             <- makes project pip installable (pip install -e .) so src can be imported
     │
-    ├── install.sh           <- download and extract source data, install package
+   ├── install.sh           <- materialize date-filtered source data and install package
     │
     ├── src/ramprate         <- Source code for use in this project.
     │    ├── __init__.py     <- Makes ramprate a Python module
@@ -117,6 +125,6 @@ Categorical metadata like turbine type and fuel type are also aggregated to the 
     │    
     ├── tests/               <- a handful of tests. This project is not well tested.
     │    
-    └── data_in/             <- destination directory for install.sh data download/extraction
+   └── data_in/             <- destination directory for install.sh data outputs
 
 --------

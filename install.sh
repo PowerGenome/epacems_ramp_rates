@@ -12,56 +12,63 @@ fi
 mkdir -p ./data_in
 
 SOURCE_URL="https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/core_epacems__hourly_emissions.parquet"
-RAW_FILE=./data_in/core_epacems__hourly_emissions.parquet
-FILTERED_FILE=./data_in/core_epacems__hourly_emissions_2015_present.parquet
+START_DATE="${START_DATE:-2015-01-01}"
+END_DATE="${END_DATE:-}"
 
-if [ -f "$RAW_FILE" ]; then
-    echo "$RAW_FILE already downloaded."
+if [ -n "$END_DATE" ]; then
+    RANGE_SUFFIX="${START_DATE}_to_${END_DATE}"
 else
-    echo "Downloading EPA CEMS parquet from PUDL nightly..."
-    curl -L "$SOURCE_URL" -o "$RAW_FILE"
+    RANGE_SUFFIX="${START_DATE}_to_present"
 fi
+FILTERED_FILE="./data_in/core_epacems__hourly_emissions_${RANGE_SUFFIX}.parquet"
 
 if [ -f "$FILTERED_FILE" ]; then
     echo "$FILTERED_FILE already exists."
 else
-    echo "Filtering EPA CEMS parquet to operating_datetime_utc >= 2015-01-01..."
-    uvx --with pyarrow python - <<'PY'
-import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.dataset as ds
-import pyarrow.parquet as pq
+    if [ -n "$END_DATE" ]; then
+        echo "Materializing EPA CEMS parquet for ${START_DATE} <= operating_datetime_utc < ${END_DATE}..."
+    else
+        echo "Materializing EPA CEMS parquet for operating_datetime_utc >= ${START_DATE}..."
+    fi
 
-source = "./data_in/core_epacems__hourly_emissions.parquet"
-target = "./data_in/core_epacems__hourly_emissions_2015_present.parquet"
+    SOURCE_URL="$SOURCE_URL" START_DATE="$START_DATE" END_DATE="$END_DATE" FILTERED_FILE="$FILTERED_FILE" \
+    uvx --with duckdb python - <<'PY'
+import os
 
-dataset = ds.dataset(source, format="parquet")
-scanner = dataset.scanner(batch_size=250_000)
+import duckdb
 
-writer = None
-for batch in scanner.to_batches():
-    if "operating_datetime_utc" not in batch.schema.names:
-        raise KeyError("Column operating_datetime_utc was not found in source parquet.")
+source = os.environ["SOURCE_URL"]
+start_date = os.environ["START_DATE"]
+end_date = os.environ["END_DATE"]
+target = os.environ["FILTERED_FILE"]
 
-    years = pc.year(batch.column("operating_datetime_utc"))
-    mask = pc.greater_equal(years, pa.scalar(2015, type=pa.int64()))
-    filtered = batch.filter(mask)
-    if filtered.num_rows == 0:
-        continue
+con = duckdb.connect()
+if end_date:
+    sql = """
+    COPY (
+        SELECT *
+        FROM read_parquet(?)
+        WHERE operating_datetime_utc >= CAST(? AS TIMESTAMP)
+          AND operating_datetime_utc < CAST(? AS TIMESTAMP)
+    ) TO ? (FORMAT PARQUET, COMPRESSION ZSTD)
+    """
+    params = [source, start_date, end_date, target]
+else:
+    sql = """
+    COPY (
+        SELECT *
+        FROM read_parquet(?)
+        WHERE operating_datetime_utc >= CAST(? AS TIMESTAMP)
+    ) TO ? (FORMAT PARQUET, COMPRESSION ZSTD)
+    """
+    params = [source, start_date, target]
 
-    table = pa.Table.from_batches([filtered])
-    if writer is None:
-        writer = pq.ParquetWriter(target, table.schema)
-    writer.write_table(table)
-
-if writer is None:
-    raise RuntimeError("No rows found on or after 2015-01-01 in source parquet.")
-
-writer.close()
+con.execute(sql, params)
+con.close()
 PY
 fi
 
-echo "EPA_CEMS_DATA_PATH=$(pwd)/data_in/core_epacems__hourly_emissions_2015_present.parquet" > .env
+echo "EPA_CEMS_DATA_PATH=$(pwd)/${FILTERED_FILE#./}" > .env
 
 echo "Creating uv environment and installing package..."
 uv sync --extra dev
