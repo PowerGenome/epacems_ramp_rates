@@ -14,8 +14,17 @@ load_dotenv()
 # from makefile:install
 EPA_CEMS_DATA_PATH = getenv("EPA_CEMS_DATA_PATH")
 
-EPA_CROSSWALK_RELEASE = (
-    "https://github.com/USEPA/camd-eia-crosswalk/releases/download/v0.3/"
+PUDL_EPA_EIA_CROSSWALK_URL = (
+    "https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/"
+    "core_epa__assn_eia_epacamd.parquet"
+)
+PUDL_EIA860M_CHANGELOG_GENERATORS_URL = (
+    "https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/"
+    "core_eia860m__changelog_generators.parquet"
+)
+CAMD_EIA_CROSSWALK_CSV_URL = (
+    "https://raw.githubusercontent.com/catalyst-cooperative/"
+    "camd-eia-crosswalk-latest/refs/heads/main/epa_eia_crosswalk.csv"
 )
 
 ALL_STATES = (  # includes territories and DC
@@ -274,5 +283,65 @@ def load_epacems(
     return cems
 
 
-def load_epa_crosswalk():
-    return pd.read_csv(EPA_CROSSWALK_RELEASE + "epa_eia_crosswalk.csv")
+def load_eia860m_changelog_generators() -> pd.DataFrame:
+    """Load EIA860m generator changelog data for month-aware capacity joins."""
+    cols = [
+        "report_date",
+        "valid_until_date",
+        "plant_id_eia",
+        "generator_id",
+        "capacity_mw",
+    ]
+    out = pd.read_parquet(PUDL_EIA860M_CHANGELOG_GENERATORS_URL, columns=cols)
+    out["generator_id"] = out["generator_id"].astype("string")
+    out["report_date"] = pd.to_datetime(out["report_date"]).dt.tz_localize(None)
+    out["valid_until_date"] = pd.to_datetime(out["valid_until_date"]).dt.tz_localize(
+        None
+    )
+    return out
+
+
+def load_epa_crosswalk() -> pd.DataFrame:
+    """Load EPA/EIA crosswalk from PUDL parquet and enrich with CAMD CSV fields.
+
+    The PUDL parquet provides annual CAMD<->EIA associations. It does not include
+    many legacy CAMD/EIA metadata fields used downstream (e.g. fuel and capacity).
+    Those fields are sourced from the latest CAMD/EIA crosswalk CSV and merged in.
+    """
+    pudl_cols = [
+        "report_year",
+        "plant_id_epa",
+        "emissions_unit_id_epa",
+        "plant_id_eia",
+        "generator_id",
+    ]
+    pudl_xwalk = pd.read_parquet(PUDL_EPA_EIA_CROSSWALK_URL, columns=pudl_cols)
+    pudl_xwalk = pudl_xwalk.rename(
+        columns={
+            "plant_id_epa": "CAMD_PLANT_ID",
+            "emissions_unit_id_epa": "CAMD_UNIT_ID",
+            "plant_id_eia": "EIA_PLANT_ID",
+            "generator_id": "EIA_GENERATOR_ID",
+        }
+    )
+    pudl_xwalk["CAMD_UNIT_ID"] = pudl_xwalk["CAMD_UNIT_ID"].astype("string")
+    pudl_xwalk["EIA_GENERATOR_ID"] = pudl_xwalk["EIA_GENERATOR_ID"].astype("string")
+
+    camd_xwalk = pd.read_csv(CAMD_EIA_CROSSWALK_CSV_URL)
+    camd_xwalk["CAMD_UNIT_ID"] = camd_xwalk["CAMD_UNIT_ID"].astype("string")
+    camd_xwalk["EIA_GENERATOR_ID"] = camd_xwalk["EIA_GENERATOR_ID"].astype("string")
+
+    merge_keys = [
+        "CAMD_PLANT_ID",
+        "CAMD_UNIT_ID",
+        "EIA_PLANT_ID",
+        "EIA_GENERATOR_ID",
+    ]
+    camd_meta = camd_xwalk.drop_duplicates(subset=merge_keys)
+
+    merged = pudl_xwalk.merge(
+        camd_meta,
+        on=merge_keys,
+        how="left",
+    )
+    return merged

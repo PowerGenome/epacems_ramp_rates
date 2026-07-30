@@ -22,7 +22,12 @@ from tqdm import tqdm
 from ramprate.build_features import _remove_irrelevant, process_subset
 
 # from pudl.constants import us_states
-from ramprate.load_dataset import ALL_STATES, load_epa_crosswalk, load_epacems
+from ramprate.load_dataset import (
+    ALL_STATES,
+    load_eia860m_changelog_generators,
+    load_epa_crosswalk,
+    load_epacems,
+)
 
 # territories are not in EPA CEMS. District of Columbia is.
 TERRITORIES = {"MP", "PR", "AS", "GU", "NA", "VI"}
@@ -61,11 +66,13 @@ def process(
 
     crosswalk = load_epa_crosswalk()
     crosswalk = _remove_irrelevant(crosswalk)  # remove unmatched or non-exporting
+    eia_capacity_changelog = load_eia860m_changelog_generators()
 
     # process in chunks due to memory constraints.
     # If you use an instance with 10+ GB memory per year of data analyzed, this won't be necessary.
     aggregates = []
     modified_crosswalk = []
+    monthly_capacity_matches = []
     offset = 0
     chunks = [states[i : i + chunk_size] for i in range(0, len(states), chunk_size)]
     for subset_states in tqdm(chunks):
@@ -79,13 +86,19 @@ def process(
         )
         cems.sort_index(inplace=True)
 
-        outputs = process_subset(cems, crosswalk, component_id_offset=offset)
+        outputs = process_subset(
+            cems,
+            crosswalk,
+            component_id_offset=offset,
+            eia_capacity_changelog=eia_capacity_changelog,
+        )
         agg = outputs["component_aggs"]
 
         # convert iterable types to something more amenable to csv
         agg["EIA_UNIT_TYPE"] = agg["EIA_UNIT_TYPE"].transform(lambda x: str(tuple(x)))
         aggregates.append(agg)
         modified_crosswalk.append(outputs["key_map"])
+        monthly_capacity_matches.append(outputs["monthly_capacity_match"])
         offset += agg.index.max() + 1  # prevent ID overlap when using chunking
 
     aggregates = pd.concat(aggregates, axis=0)
@@ -94,6 +107,12 @@ def process(
     modified_crosswalk.to_csv(
         out_path.parent / f"{out_path.stem}_crosswalk_with_IDs.csv"
     )
+    monthly_capacity_match = pd.concat(monthly_capacity_matches, axis=0, ignore_index=True)
+    if not monthly_capacity_match.empty:
+        monthly_capacity_match.to_csv(
+            out_path.parent / f"{out_path.stem}_monthly_capacity_match.csv",
+            index=False,
+        )
     return
 
 

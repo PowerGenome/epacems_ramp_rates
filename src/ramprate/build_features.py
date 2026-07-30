@@ -336,8 +336,85 @@ def _filter_retirements(df: pd.DataFrame, year_range: Tuple[int, int]) -> pd.Dat
 
 def _remove_irrelevant(df: pd.DataFrame):
     """remove unmatched or excluded (non-exporting) units"""
-    bad = df["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
+    match_type = df["MATCH_TYPE_GEN"].fillna("").astype("string")
+    bad = match_type.str.contains("CAMD Unmatched|Manual CAMD Excluded", regex=True)
     return df.loc[~bad]
+
+
+def _match_eia_capacity_by_month(
+    cems: pd.DataFrame, key_map: pd.DataFrame, eia_capacity_changelog: pd.DataFrame
+) -> pd.DataFrame:
+    """Match EIA generator capacity to each CEMS unit-month using changelog validity windows."""
+    key_map = key_map.reset_index(drop=True)
+    if "report_year" not in key_map.columns:
+        for fallback in ["crosswalk_report_year", "report_year_x", "report_year_y"]:
+            if fallback in key_map.columns:
+                key_map = key_map.copy()
+                key_map["report_year"] = key_map[fallback]
+                break
+    if "report_year" not in key_map.columns:
+        unit_years = cems.reset_index(drop=True)[["unit_id_epa", "report_year"]].drop_duplicates()
+        key_map = key_map.merge(unit_years, on="unit_id_epa", how="left")
+    cems_months = cems.reset_index(drop=True)[
+        ["unit_id_epa", "operating_datetime_utc", "report_year"]
+    ].copy()
+    cems_months["report_month"] = (
+        cems_months["operating_datetime_utc"]
+        .dt.tz_localize(None)
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+    cems_months = cems_months[["unit_id_epa", "report_year", "report_month"]]
+    cems_months = cems_months.drop_duplicates()
+    cems_months = cems_months.reset_index(drop=True)
+    cems_months.index.name = None
+
+    unit_year_to_gen = key_map[
+        ["unit_id_epa", "report_year", "EIA_PLANT_ID", "EIA_GENERATOR_ID"]
+    ].drop_duplicates()
+    unit_year_to_gen = unit_year_to_gen.reset_index(drop=True)
+    unit_year_to_gen.index.name = None
+    unit_year_to_gen["EIA_PLANT_ID"] = pd.to_numeric(
+        unit_year_to_gen["EIA_PLANT_ID"], errors="coerce"
+    )
+    unit_year_to_gen["EIA_GENERATOR_ID"] = unit_year_to_gen["EIA_GENERATOR_ID"].astype(
+        "string"
+    )
+
+    cems_months_join = cems_months.rename(columns={"unit_id_epa": "_unit_id_epa"})
+    map_join = unit_year_to_gen.rename(columns={"unit_id_epa": "_unit_id_epa"})
+    candidates = cems_months_join.merge(
+        map_join,
+        on=["_unit_id_epa", "report_year"],
+        how="left",
+    ).rename(columns={"_unit_id_epa": "unit_id_epa"})
+    candidates = candidates.merge(
+        eia_capacity_changelog,
+        left_on=["EIA_PLANT_ID", "EIA_GENERATOR_ID"],
+        right_on=["plant_id_eia", "generator_id"],
+        how="left",
+    )
+
+    valid = candidates.loc[
+        candidates["report_month"].ge(candidates["report_date"])
+        & (
+            candidates["valid_until_date"].isna()
+            | candidates["report_month"].lt(candidates["valid_until_date"])
+        )
+    ].copy()
+    if valid.empty:
+        return pd.DataFrame(
+            columns=["unit_id_epa", "report_year", "report_month", "EIA_NAMEPLATE_CAPACITY"]
+        )
+
+    valid = valid.rename(columns={"capacity_mw": "EIA_NAMEPLATE_CAPACITY"})
+    # Aggregate all valid mapped generators for each CEMS unit-month.
+    return (
+        valid.groupby(["unit_id_epa", "report_year", "report_month"], as_index=False)[
+            "EIA_NAMEPLATE_CAPACITY"
+        ]
+        .sum(min_count=1)
+    )
 
 
 def _prep_crosswalk_for_networkx(
@@ -480,7 +557,12 @@ def _assign_by_capacity(xwalk: pd.DataFrame, col: str) -> pd.Series:
     return out
 
 
-def process_subset(cems, crosswalk, component_id_offset=0):
+def process_subset(
+    cems,
+    crosswalk,
+    component_id_offset=0,
+    eia_capacity_changelog: Optional[pd.DataFrame] = None,
+):
     """Top level API to analyze a dataset for component-wise max ramp rates
 
     Args:
@@ -494,6 +576,7 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         "key_map": inner join of crosswalk and CEMS id columns
         "component_timeseries": CEMS timeseries aggregated to component level
         "cems": CEMS data
+        "monthly_capacity_match": EIA860m capacity matched to each CEMS unit-month
     }
     """
     if "unit_id_epa" not in cems.index.names:
@@ -504,6 +587,7 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         cems.sort_index(inplace=True)
 
     calc_distance_from_downtime(cems)  # in place
+    cems = cems.reset_index(drop=True)
     if "plant_id_epa" in cems.columns:
         plant_join_col = "plant_id_epa"
     elif "plant_id_eia" in cems.columns:
@@ -518,6 +602,18 @@ def process_subset(cems, crosswalk, component_id_offset=0):
     else:
         raise KeyError("CEMS data must include emissions_unit_id_epa or unitid.")
 
+    cems = cems.copy()
+    cems["report_year"] = cems["operating_datetime_utc"].dt.year
+    if "report_year" in crosswalk.columns:
+        min_crosswalk_year = int(crosswalk["report_year"].min())
+        max_crosswalk_year = int(crosswalk["report_year"].max())
+        cems["crosswalk_report_year"] = cems["report_year"].clip(
+            lower=min_crosswalk_year,
+            upper=max_crosswalk_year,
+        )
+    else:
+        cems["crosswalk_report_year"] = cems["report_year"]
+
     key_cols = [
         col
         for col in [
@@ -526,10 +622,15 @@ def process_subset(cems, crosswalk, component_id_offset=0):
             "unitid",
             "emissions_unit_id_epa",
             "unit_id_epa",
+            "report_year",
+            "crosswalk_report_year",
         ]
         if col in cems.columns
     ]
-    key_map = cems.groupby(level="unit_id_epa")[key_cols].first()
+    cems_keys = cems.reset_index(drop=True)
+    key_map = cems_keys.groupby(
+        ["unit_id_epa", "crosswalk_report_year"], as_index=False
+    )[key_cols].first()
     key_map[unit_join_col] = key_map[unit_join_col].astype("string")
     key_map[plant_join_col] = pd.to_numeric(key_map[plant_join_col], errors="coerce")
 
@@ -539,20 +640,105 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         crosswalk["CAMD_PLANT_ID"], errors="coerce"
     )
 
+    merge_keys_left = [plant_join_col, unit_join_col]
+    merge_keys_right = ["CAMD_PLANT_ID", "CAMD_UNIT_ID"]
+    if "report_year" in crosswalk.columns:
+        merge_keys_left.append("crosswalk_report_year")
+        merge_keys_right.append("report_year")
+
     key_map = key_map.merge(
         crosswalk,
-        left_on=[plant_join_col, unit_join_col],
-        right_on=["CAMD_PLANT_ID", "CAMD_UNIT_ID"],
+        left_on=merge_keys_left,
+        right_on=merge_keys_right,
         how="inner",
     )
-    key_map = make_subcomponent_ids(key_map, cems)
+    if "report_year_x" in key_map.columns:
+        key_map = key_map.rename(columns={"report_year_x": "report_year"})
+    if "report_year_y" in key_map.columns:
+        key_map = key_map.drop(columns=["report_year_y"])
+
+    component_key_map = key_map.dropna(
+        subset=["CAMD_PLANT_ID", "CAMD_UNIT_ID", "EIA_GENERATOR_ID"]
+    ).drop_duplicates(subset=["CAMD_PLANT_ID", "CAMD_UNIT_ID", "EIA_GENERATOR_ID"])
+    component_key_map = make_subcomponent_ids(component_key_map, cems)
+    component_key_map = component_key_map[
+        ["CAMD_PLANT_ID", "CAMD_UNIT_ID", "EIA_GENERATOR_ID", "component_id"]
+    ].drop_duplicates()
+    key_map = key_map.merge(
+        component_key_map,
+        on=["CAMD_PLANT_ID", "CAMD_UNIT_ID", "EIA_GENERATOR_ID"],
+        how="left",
+    )
     if component_id_offset:
         key_map["component_id"] = key_map["component_id"] + component_id_offset
+    key_map = key_map.loc[key_map["component_id"].notna()].copy()
+
+    monthly_capacity_match = pd.DataFrame(
+        columns=["unit_id_epa", "report_year", "report_month", "EIA_NAMEPLATE_CAPACITY"]
+    )
+    if eia_capacity_changelog is not None and not eia_capacity_changelog.empty:
+        eia_capacity_by_month = _match_eia_capacity_by_month(
+            cems, key_map, eia_capacity_changelog
+        )
+        monthly_capacity_match = eia_capacity_by_month.copy()
+        if not eia_capacity_by_month.empty:
+            cems["report_month"] = (
+                cems["operating_datetime_utc"]
+                .dt.tz_localize(None)
+                .dt.to_period("M")
+                .dt.to_timestamp()
+            )
+            cems = cems.merge(
+                eia_capacity_by_month,
+                on=["unit_id_epa", "report_year", "report_month"],
+                how="left",
+            )
+
+            eia_capacity_for_meta = (
+                eia_capacity_by_month.groupby(["unit_id_epa", "report_year"])[
+                    "EIA_NAMEPLATE_CAPACITY"
+                ]
+                .max()
+                .rename("EIA_NAMEPLATE_CAPACITY_FROM_860M")
+                .reset_index()
+            )
+            key_map = key_map.merge(
+                eia_capacity_for_meta,
+                on=["unit_id_epa", "report_year"],
+                how="left",
+            )
+            if "EIA_NAMEPLATE_CAPACITY" in key_map.columns:
+                key_map["EIA_NAMEPLATE_CAPACITY"] = key_map[
+                    "EIA_NAMEPLATE_CAPACITY_FROM_860M"
+                ].combine_first(key_map["EIA_NAMEPLATE_CAPACITY"])
+            else:
+                key_map["EIA_NAMEPLATE_CAPACITY"] = key_map[
+                    "EIA_NAMEPLATE_CAPACITY_FROM_860M"
+                ]
+            key_map.drop(columns=["EIA_NAMEPLATE_CAPACITY_FROM_860M"], inplace=True)
+
+    component_map = key_map[
+        ["unit_id_epa", "crosswalk_report_year", "component_id"]
+    ].drop_duplicates()
+
+    if not monthly_capacity_match.empty and "component_id" not in monthly_capacity_match.columns:
+        unit_component_map = component_map[["unit_id_epa", "component_id"]].drop_duplicates()
+        monthly_capacity_match = monthly_capacity_match.merge(
+            unit_component_map, on="unit_id_epa", how="left"
+        )
 
     # NOTE: how='inner' drops unmatched units
-    cems = cems.join(
-        key_map.groupby("unit_id_epa")["component_id"].first(), how="inner"
+    cems = cems.merge(
+        component_map,
+        on=["unit_id_epa", "crosswalk_report_year"],
+        how="inner",
     )
+    cems.set_index(
+        ["unit_id_epa", "operating_datetime_utc"],
+        drop=False,
+        inplace=True,
+    )
+    cems.sort_index(inplace=True)
 
     # Aggregate to components
     # aggregate metadata
@@ -642,4 +828,5 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         "key_map": key_map,
         "component_timeseries": component_timeseries,
         "cems": cems,
+        "monthly_capacity_match": monthly_capacity_match,
     }
