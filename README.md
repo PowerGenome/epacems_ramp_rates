@@ -29,17 +29,28 @@ Characterization of power plant maximum ramp rates (in MW/hr) using hourly EPA C
    bash install.sh
    ```
 
-The data source is the EPA CEMS dataset as defined by the [catalyst-cooperative/pudl](https://github.com/catalyst-cooperative/pudl) repo. The `install.sh` script downloads several GB of the latest data for you.
+   Optional date range controls:
+
+   ```bash
+   START_DATE=2015-01-01 END_DATE=2025-01-01 bash install.sh
+   ```
+
+   `START_DATE` is inclusive. `END_DATE` is exclusive. If `END_DATE` is omitted, data is pulled through the newest available records.
+
+The data source is the PUDL nightly EPA CEMS parquet file:
+https://s3.us-west-2.amazonaws.com/pudl.catalyst.coop/nightly/core_epacems__hourly_emissions.parquet
+
+`install.sh` materializes a local parquet directly from that remote file for only the requested date range using `operating_datetime_utc` filters, rather than downloading the entire source parquet first.
 
 ## Usage
 
-To create .csv files with the results of this analysis, use the CLI:`$ calc_ramps MY_OUTPUT.CSV`. See `--help` for details about optional arguments like analyzing a subset of states or years. The script takes about 1.5 minutes per year of data to run.
+To create .csv files with the results of this analysis, use the CLI: `$ calc_ramps MY_OUTPUT.CSV`. See `--help` for details about optional arguments like analyzing a subset of states or years. The script takes about 1.5 minutes per year of data to run.
 
 For interactive use in a jupyter notebook, see the example in notebooks/8.0-tb-example_of_interactive_use.ipynb. Notebooks 0.0 to 7.0 were used for development and are not well documented.
 
 ### Output Data Dictionary
 
-See [/results/REAMDE.md](https://github.com/catalyst-cooperative/epacems_ramp_rates/tree/main/results)
+See [results/README.md](results/README.md)
 
 ## Methodology
 
@@ -94,7 +105,7 @@ Categorical metadata like turbine type and fuel type are also aggregated to the 
     │
     ├── setup.py             <- makes project pip installable (pip install -e .) so src can be imported
     │
-    ├── install.sh           <- download and extract source data, install package
+   ├── install.sh           <- materialize date-filtered source data and install package
     │
     ├── src/ramprate         <- Source code for use in this project.
     │    ├── __init__.py     <- Makes ramprate a Python module
@@ -114,6 +125,6 @@ Categorical metadata like turbine type and fuel type are also aggregated to the 
     │    
     ├── tests/               <- a handful of tests. This project is not well tested.
     │    
-    └── data_in/             <- destination directory for install.sh data download/extraction
+   └── data_in/             <- destination directory for install.sh data outputs
 
 --------

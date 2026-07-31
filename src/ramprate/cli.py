@@ -11,17 +11,23 @@ Outputs:
         failed to join and were thus excluded from this analysis."""
 
 import argparse
-from pathlib import Path
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Sequence
 
 import pandas as pd
 from tqdm import tqdm
 
-# from pudl.constants import us_states
-from ramprate.load_dataset import load_epacems, load_epa_crosswalk, ALL_STATES
-from ramprate.build_features import process_subset, _remove_irrelevant
+from ramprate.build_features import _remove_irrelevant, process_subset
 
+# from pudl.constants import us_states
+from ramprate.load_dataset import (
+    ALL_STATES,
+    load_eia860m_changelog_generators,
+    load_epa_crosswalk,
+    load_epacems,
+)
 
 # territories are not in EPA CEMS. District of Columbia is.
 TERRITORIES = {"MP", "PR", "AS", "GU", "NA", "VI"}
@@ -37,7 +43,9 @@ def process(
     """calculate max ramp rates and other metrics per connected subcomponent in EPA CEMS"""
     out_path = Path(out_path)
     if not out_path.parent.exists():
-        raise ValueError(f"Parent directory does not exist: {out_path.parent.absolute()}")
+        raise ValueError(
+            f"Parent directory does not exist: {out_path.parent.absolute()}"
+        )
 
     if state_subset is None:
         # state_subset = us_states.keys()  # all states
@@ -48,7 +56,8 @@ def process(
     # minimum subset of columns to load
     cems_cols = [
         "plant_id_eia",
-        "unitid",
+        "plant_id_epa",
+        "emissions_unit_id_epa",
         "operating_datetime_utc",
         "gross_load_mw",
         "unit_id_epa",
@@ -57,15 +66,19 @@ def process(
 
     crosswalk = load_epa_crosswalk()
     crosswalk = _remove_irrelevant(crosswalk)  # remove unmatched or non-exporting
+    eia_capacity_changelog = load_eia860m_changelog_generators()
 
     # process in chunks due to memory constraints.
     # If you use an instance with 10+ GB memory per year of data analyzed, this won't be necessary.
     aggregates = []
     modified_crosswalk = []
+    monthly_capacity_matches = []
     offset = 0
     chunks = [states[i : i + chunk_size] for i in range(0, len(states), chunk_size)]
     for subset_states in tqdm(chunks):
-        cems = load_epacems(states=subset_states, years=years, columns=cems_cols, engine="pandas")
+        cems = load_epacems(
+            states=subset_states, years=years, columns=cems_cols, engine="pandas"
+        )
         cems.set_index(
             ["unit_id_epa", "operating_datetime_utc"],
             drop=False,
@@ -73,19 +86,33 @@ def process(
         )
         cems.sort_index(inplace=True)
 
-        outputs = process_subset(cems, crosswalk, component_id_offset=offset)
+        outputs = process_subset(
+            cems,
+            crosswalk,
+            component_id_offset=offset,
+            eia_capacity_changelog=eia_capacity_changelog,
+        )
         agg = outputs["component_aggs"]
 
         # convert iterable types to something more amenable to csv
         agg["EIA_UNIT_TYPE"] = agg["EIA_UNIT_TYPE"].transform(lambda x: str(tuple(x)))
         aggregates.append(agg)
         modified_crosswalk.append(outputs["key_map"])
+        monthly_capacity_matches.append(outputs["monthly_capacity_match"])
         offset += agg.index.max() + 1  # prevent ID overlap when using chunking
 
     aggregates = pd.concat(aggregates, axis=0)
     aggregates.to_csv(out_path)
     modified_crosswalk = pd.concat(modified_crosswalk, axis=0)
-    modified_crosswalk.to_csv(out_path.parent / f"{out_path.stem}_crosswalk_with_IDs.csv")
+    modified_crosswalk.to_csv(
+        out_path.parent / f"{out_path.stem}_crosswalk_with_IDs.csv"
+    )
+    monthly_capacity_match = pd.concat(monthly_capacity_matches, axis=0, ignore_index=True)
+    if not monthly_capacity_match.empty:
+        monthly_capacity_match.to_csv(
+            out_path.parent / f"{out_path.stem}_monthly_capacity_match.csv",
+            index=False,
+        )
     return
 
 
@@ -107,8 +134,8 @@ def main():
     parser.add_argument(
         "--end_year",
         type=int,
-        default=2019,
-        help="""last year of CEMS data to include in analysis. Inclusive. Default is 2019.""",
+        default=datetime.now(timezone.utc).year,
+        help="""last year of CEMS data to include in analysis. Inclusive. Default is current year.""",
     )
     parser.add_argument(
         "--state_subset",
